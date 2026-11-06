@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
+import io
 
 # Configuração inicial da página
 st.set_page_config(
@@ -71,6 +72,14 @@ def calcular_historico_mensal(df):
     if registros:
         return pd.concat(registros, ignore_index=True)
     return pd.DataFrame()
+
+# Função auxiliar para gerar o arquivo Excel da Matriz Mês a Mês em memória
+def gerar_excel_matriz(df_pivot, nome_aba="Matriz Historica"):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_pivot.to_excel(writer, sheet_name=nome_aba)
+    processed_data = output.getvalue()
+    return processed_data
 
 # Título do Sistema
 st.title("🚘 GovFleet — Sistema de Controle de Contratos e Frota")
@@ -188,7 +197,6 @@ with tab2:
         tab_matriz1, tab_matriz2 = st.tabs(["Matriz de Valores (R$)", "Matriz de Quantidade de Contratos"])
         
         with tab_matriz1:
-            # Pivotar utilizando a Data_Ref real para garantir a sequência temporal correta
             pivot_valor = df_hist_filtrado.pivot_table(
                 index='Secretaria_Limpa',
                 columns='Data_Ref',
@@ -196,12 +204,19 @@ with tab2:
                 aggfunc='sum',
                 fill_value=0
             )
-            # Formatar cabeçalho das colunas para MM/AAAA após ordenação
             pivot_valor.columns = pivot_valor.columns.strftime('%m/%Y')
             st.dataframe(pivot_valor.style.format("R$ {:,.2f}"), use_container_width=True)
             
+            # BOTÃO DE EXPORTAÇÃO EXCEL DA MATRIZ DE VALORES
+            excel_bytes_val = gerar_excel_matriz(pivot_valor, "Valores Mensais")
+            st.download_button(
+                label="🟢 Exportar Matriz de Valores em Excel (.xlsx)",
+                data=excel_bytes_val,
+                file_name="matriz_historica_valores.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            
         with tab_matriz2:
-            # Pivotar utilizando a Data_Ref real para garantir a sequência temporal correta
             pivot_qtd = df_hist_filtrado.pivot_table(
                 index='Secretaria_Limpa',
                 columns='Data_Ref',
@@ -209,9 +224,17 @@ with tab2:
                 aggfunc='sum',
                 fill_value=0
             )
-            # Formatar cabeçalho das colunas para MM/AAAA após ordenação
             pivot_qtd.columns = pivot_qtd.columns.strftime('%m/%Y')
             st.dataframe(pivot_qtd.style.format("{:.0f}"), use_container_width=True)
+            
+            # BOTÃO DE EXPORTAÇÃO EXCEL DA MATRIZ DE QUANTIDADES
+            excel_bytes_qtd = gerar_excel_matriz(pivot_qtd, "Qtd Contratos")
+            st.download_button(
+                label="🟢 Exportar Matriz de Quantidades em Excel (.xlsx)",
+                data=excel_bytes_qtd,
+                file_name="matriz_historica_quantidades.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
     else:
         st.info("Nenhum dado histórico encontrado para os filtros selecionados.")
 
