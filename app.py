@@ -1,131 +1,287 @@
+import streamlit as st
 import pandas as pd
 import plotly.express as px
-import streamlit as st
+from datetime import datetime
+import io
 
-# -----------------------------------------------------------------------------
-# 1. TRATAMENTO E PREPARAÇÃO DOS DADOS
-# -----------------------------------------------------------------------------
+# Configuração inicial da página
+st.set_page_config(
+    page_title="GovFleet - Gestão de Contratos e Frota",
+    page_icon="🚘",
+    layout="wide"
+)
 
+# Estilização CSS customizada
+st.markdown("""
+<style>
+    .metric-card {
+        background-color: #f8f9fa;
+        border-radius: 10px;
+        padding: 15px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+</style>
+""", unsafe_allow_html=True)
 
-def preparar_dados(df):
-    # Garante que a coluna de data está no formato datetime
-    df['Data'] = pd.to_datetime(df['Data'])
-
-    # Cria coluna para ordenação cronológica real (ex: 2024-09)
-    df['AnoMes_Sort'] = df['Data'].dt.strftime('%Y-%m')
-
-    # Cria rótulo visual formatado para exibição (ex: 09/2024)
-    df['Mes_Ano'] = df['Data'].dt.strftime('%m/%Y')
-
+# Função para tratar e padronizar os DataFrames carregados
+def tratar_dataframe(df):
+    # Tratamento dos nomes das Secretarias (Limpeza de pontos e sub-órgãos)
+    df['Secretaria_Limpa'] = df['Secretaria/Órgão'].apply(
+        lambda x: str(x).strip().lstrip('.').split('/')[0].strip()
+    )
+    
+    # Conversão e padronização de tipos
+    df['Início Contrato'] = pd.to_datetime(df['Início Contrato'])
+    df['Fim Contrato'] = pd.to_datetime(df['Fim Contrato'])
+    df['Valor Mensal'] = pd.to_numeric(df['Valor Mensal'], errors='coerce')
+    
     return df
 
-
-# -----------------------------------------------------------------------------
-# 2. GERAÇÃO DA MATRIZ MATRIZ DE DADOS MÊS A MÊS (ORDENAÇÃO CORRETA)
-# -----------------------------------------------------------------------------
-
-
-def gerar_matriz_contratos(df, valor_ou_qtd='qtd'):
-    # Ordena primeiro a base de dados pela chave cronológica
-    df_ordenado = df.sort_values('AnoMes_Sort')
-
-    campo_valor = 'Qtd_Contratos' if valor_ou_qtd == 'qtd' else 'Valor_Total'
-    funcao_agg = 'count' if valor_ou_qtd == 'qtd' else 'sum'
-
-    # Cria a matriz mantendo a ordem das colunas (sort=False)
-    matriz = df_ordenado.pivot_table(
-        index='Secretaria',
-        columns='Mes_Ano',
-        values=campo_valor,
-        aggfunc=funcao_agg,
-        fill_value=0,
-        sort=False,  # Preserva a ordem cronológica vinda de 'df_ordenado'
-    )
-
-    return matriz
-
-
-# -----------------------------------------------------------------------------
-# 3. GERAÇÃO DO GRÁFICO DE ROSCA (SEM LINHAS CORTADAS)
-# -----------------------------------------------------------------------------
-
-
-def gerar_grafico_locadoras(df, threshold_percent=2.0):
-    # Agrupa valores por Locadora
-    df_locadoras = (
-        df.groupby('Locadora', as_index=False)['Valor_Total']
-        .sum()
-        .sort_values('Valor_Total', ascending=False)
-    )
-
-    # Calcula percentual de cada locadora
-    total_custo = df_locadoras['Valor_Total'].sum()
-    df_locadoras['Percentual'] = (
-        df_locadoras['Valor_Total'] / total_custo
-    ) * 100
-
-    # Agrupa locadoras com participação menor que o limite (ex: 2%) em 'Outros'
-    locadoras_principais = df_locadoras[
-        df_locadoras['Percentual'] >= threshold_percent
-    ].copy()
-    outros_valor = df_locadoras[
-        df_locadoras['Percentual'] < threshold_percent
-    ]['Valor_Total'].sum()
-
-    if outros_valor > 0:
-        df_outros = pd.DataFrame(
-            [{'Locadora': 'Outros', 'Valor_Total': outros_valor}]
-        )
-        df_final = pd.concat(
-            [locadoras_principais[['Locadora', 'Valor_Total']], df_outros],
-            ignore_index=True,
-        )
+# Função para carregar dados de arquivo local ou enviado pelo usuário
+@st.cache_data
+def carregar_dados_arquivo(uploaded_file):
+    if isinstance(uploaded_file, str):
+        df = pd.read_excel(uploaded_file)
     else:
-        df_final = locadoras_principais[['Locadora', 'Valor_Total']]
+        df = pd.read_excel(uploaded_file)
+    return tratar_dataframe(df)
 
-    # Criação do Gráfico no Plotly
-    fig = px.pie(
-        df_final,
-        values='Valor_Total',
-        names='Locadora',
-        hole=0.4,
-        title='Distribuição de Custos por Locadora',
-        color_discrete_sequence=px.colors.qualitative.Pastel,
+# Função para calcular o histórico mensal por Secretaria
+def calcular_historico_mensal(df):
+    inicio_min = df['Início Contrato'].min()
+    fim_max = df['Fim Contrato'].max()
+    
+    # Intervalo de meses a partir da data do primeiro contrato até a data máxima cadastrada
+    intervalo_meses = pd.date_range(
+        start=inicio_min.replace(day=1),
+        end=min(fim_max, pd.to_datetime('2026-10-31')).replace(day=1),
+        freq='MS'
     )
+    
+    registros = []
+    for dt in intervalo_meses:
+        fim_do_mes = dt + pd.offsets.MonthEnd(1)
+        
+        # Filtrar contratos que estavam ativos durante o mês de referência
+        df_mes = df[(df['Início Contrato'] <= fim_do_mes) & (df['Fim Contrato'] >= dt)]
+        
+        grp = df_mes.groupby('Secretaria_Limpa').agg(
+            qtd_contratos=('Contrato', 'count'),
+            valor_total=('Valor Mensal', 'sum')
+        ).reset_index()
+        
+        grp['Data_Ref'] = dt
+        grp['Mes_Ano'] = dt.strftime('%Y-%m')
+        grp['Mes_Formatado'] = dt.strftime('%m/%Y')
+        registros.append(grp)
+        
+    if registros:
+        return pd.concat(registros, ignore_index=True)
+    return pd.DataFrame()
 
-    # Oculta linhas de chamada externas e coloca os rótulos no interior das fatias
-    fig.update_traces(
-        textposition='inside',
-        textinfo='percent+label',
-        insidetextorientation='radial',
+# Função auxiliar para gerar o arquivo Excel da Matriz Mês a Mês em memória
+def gerar_excel_matriz(df_pivot, nome_aba="Matriz Historica"):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_pivot.to_excel(writer, sheet_name=nome_aba)
+    processed_data = output.getvalue()
+    return processed_data
+
+# Título do Sistema
+st.title("🚘 GovFleet — Sistema de Controle de Contratos e Frota")
+st.caption("Painel Executivo, Gestão Operacional e Evolução Temporal das Secretarias.")
+
+# --- BARRA LATERAL (UPLOAD E FILTROS GLOBAIS) ---
+st.sidebar.header("📥 Importar Nova Planilha")
+uploaded_file = st.sidebar.file_uploader(
+    "Faça upload do arquivo Excel (.xlsx)", 
+    type=["xlsx", "xls"]
+)
+
+caminho_excel = 'Contratos vigentes em 31-10-2026.xlsx'
+
+try:
+    if uploaded_file is not None:
+        df = carregar_dados_arquivo(uploaded_file)
+        st.sidebar.success("✅ Planilha carregada e processada com sucesso!")
+    else:
+        df = carregar_dados_arquivo(caminho_excel)
+        st.sidebar.info("ℹ️ Usando planilha padrão base do repositório.")
+        
+    df_historico = calcular_historico_mensal(df)
+except Exception as e:
+    st.error(f"Erro ao ler os dados da planilha: {e}")
+    st.stop()
+
+st.sidebar.markdown("---")
+st.sidebar.header("🔍 Filtros Globais")
+
+secretarias = ["Todas"] + sorted(list(df['Secretaria_Limpa'].unique()))
+sec_selecionada = st.sidebar.selectbox("Filtrar por Secretaria", secretarias)
+
+locadoras = ["Todas"] + sorted(list(df['Locadora'].unique()))
+loc_selecionada = st.sidebar.selectbox("Filtrar por Locadora", locadoras)
+
+tipos_veiculo = ["Todos"] + sorted(list(df['Tipo Veículo'].unique()))
+tipo_selecionado = st.sidebar.selectbox("Filtrar por Tipo de Veículo", tipos_veiculo)
+
+# Aplicando os filtros selecionados
+df_filtrado = df.copy()
+df_hist_filtrado = df_historico.copy()
+
+if sec_selecionada != "Todas":
+    df_filtrado = df_filtrado[df_filtrado['Secretaria_Limpa'] == sec_selecionada]
+    if not df_hist_filtrado.empty:
+        df_hist_filtrado = df_hist_filtrado[df_hist_filtrado['Secretaria_Limpa'] == sec_selecionada]
+
+if loc_selecionada != "Todas":
+    df_filtrado = df_filtrado[df_filtrado['Locadora'] == loc_selecionada]
+if tipo_selecionado != "Todos":
+    df_filtrado = df_filtrado[df_filtrado['Tipo Veículo'] == tipo_selecionado]
+
+# --- PAINEL DE KPIS ---
+col1, col2, col3, col4 = st.columns(4)
+
+total_valor = df_filtrado['Valor Mensal'].sum()
+total_contratos = len(df_filtrado)
+ticket_medio = df_filtrado['Valor Mensal'].mean() if total_contratos > 0 else 0
+total_secretarias = df_filtrado['Secretaria_Limpa'].nunique()
+
+col1.metric("Valor Mensal Atual", f"R$ {total_valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+col2.metric("Contratos Vigentes", f"{total_contratos}")
+col3.metric("Valor Médio / Veículo", f"R$ {ticket_medio:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+col4.metric("Secretarias Ativas", f"{total_secretarias}")
+
+st.markdown("---")
+
+# --- NAVEGAÇÃO POR ABAS ---
+tab1, tab2, tab3 = st.tabs(["📊 Visão Geral", "📈 Evolução Mês a Mês", "📄 Tabela Detalhada de Contratos"])
+
+# === ABA 1: VISÃO GERAL ===
+with tab1:
+    col_g1, col_g2 = st.columns(2)
+    
+    with col_g1:
+        resumo_sec = df_filtrado.groupby('Secretaria_Limpa')['Valor Mensal'].sum().reset_index()
+        resumo_sec = resumo_sec.sort_values(by='Valor Mensal', ascending=False)
+        
+        fig_sec = px.bar(
+            resumo_sec,
+            x='Secretaria_Limpa',
+            y='Valor Mensal',
+            title="Valor Mensal Total por Secretaria",
+            labels={'Secretaria_Limpa': 'Secretaria', 'Valor Mensal': 'Valor (R$)'},
+            text_auto='.2s',
+            color='Valor Mensal',
+            color_continuous_scale='Blues'
+        )
+        fig_sec.update_layout(xaxis_tickangle=-45)
+        st.plotly_chart(fig_sec, use_container_width=True)
+
+    with col_g2:
+        resumo_loc = df_filtrado.groupby('Locadora')['Valor Mensal'].agg(['sum', 'count']).reset_index()
+        resumo_loc.columns = ['Locadora', 'Valor_Total', 'Quantidade']
+        
+        fig_loc = px.pie(
+            resumo_loc,
+            names='Locadora',
+            values='Valor_Total',
+            title="Distribuição de Custos por Locadora",
+            hole=0.4
+        )
+        st.plotly_chart(fig_loc, use_container_width=True)
+
+# === ABA 2: EVOLUÇÃO MÊS A MÊS ===
+with tab2:
+    st.subheader("📈 Acompanhamento Histórico Mensal por Secretaria")
+    
+    if not df_hist_filtrado.empty:
+        # Gráfico de Linha Cronológico
+        hist_agrupado = df_hist_filtrado.groupby(['Mes_Ano', 'Mes_Formatado', 'Data_Ref'])['valor_total'].sum().reset_index()
+        hist_agrupado = hist_agrupado.sort_values(by='Data_Ref')
+        
+        fig_linha = px.line(
+            hist_agrupado,
+            x='Mes_Formatado',
+            y='valor_total',
+            title="Evolução Total do Gasto Mensal com Contratos (R$)",
+            markers=True,
+            labels={'Mes_Formatado': 'Mês/Ano', 'valor_total': 'Valor Total (R$)'}
+        )
+        st.plotly_chart(fig_linha, use_container_width=True)
+        
+        st.markdown("### 📊 Matrizes de Dados Mês a Mês")
+        
+        tab_matriz1, tab_matriz2 = st.tabs(["Matriz de Valores (R$)", "Matriz de Quantidade de Contratos"])
+        
+        with tab_matriz1:
+            pivot_valor = df_hist_filtrado.pivot_table(
+                index='Secretaria_Limpa',
+                columns='Data_Ref',
+                values='valor_total',
+                aggfunc='sum',
+                fill_value=0
+            )
+            pivot_valor.columns = pivot_valor.columns.strftime('%m/%Y')
+            st.dataframe(pivot_valor.style.format("R$ {:,.2f}"), use_container_width=True)
+            
+            excel_bytes_val = gerar_excel_matriz(pivot_valor, "Valores Mensais")
+            st.download_button(
+                label="🟢 Exportar Matriz de Valores em Excel (.xlsx)",
+                data=excel_bytes_val,
+                file_name="matriz_historica_valores.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            
+        with tab_matriz2:
+            pivot_qtd = df_hist_filtrado.pivot_table(
+                index='Secretaria_Limpa',
+                columns='Data_Ref',
+                values='qtd_contratos',
+                aggfunc='sum',
+                fill_value=0
+            )
+            pivot_qtd.columns = pivot_qtd.columns.strftime('%m/%Y')
+            st.dataframe(pivot_qtd.style.format("{:.0f}"), use_container_width=True)
+            
+            excel_bytes_qtd = gerar_excel_matriz(pivot_qtd, "Qtd Contratos")
+            st.download_button(
+                label="🟢 Exportar Matriz de Quantidades em Excel (.xlsx)",
+                data=excel_bytes_qtd,
+                file_name="matriz_historica_quantidades.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+    else:
+        st.info("Nenhum dado histórico encontrado para os filtros selecionados.")
+
+# === ABA 3: TABELA DETALHADA ===
+with tab3:
+    st.subheader("📄 Cadastro de Contratos Vigentes")
+    
+    busca = st.text_input("🔎 Pesquisar por Placa, Número de Contrato, Licitação ou Órgão:")
+    
+    if busca:
+        df_filtrado = df_filtrado[
+            df_filtrado['Contrato'].astype(str).str.contains(busca, case=False, na=False) |
+            df_filtrado['Véiculo Placas'].astype(str).str.contains(busca, case=False, na=False) |
+            df_filtrado['Licitação'].astype(str).str.contains(busca, case=False, na=False) |
+            df_filtrado['Secretaria/Órgão'].astype(str).str.contains(busca, case=False, na=False)
+        ]
+        
+    df_exibicao = df_filtrado[[
+        'Contrato', 'Licitação', 'Secretaria_Limpa', 'Secretaria/Órgão', 
+        'Véiculo Placas', 'Tipo Veículo', 'Valor Mensal', 'Início Contrato', 'Fim Contrato', 'Locadora'
+    ]].copy()
+
+    df_exibicao['Início Contrato'] = df_exibicao['Início Contrato'].dt.strftime('%d/%m/%Y')
+    df_exibicao['Fim Contrato'] = df_exibicao['Fim Contrato'].dt.strftime('%d/%m/%Y')
+    df_exibicao['Valor Mensal'] = df_exibicao['Valor Mensal'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+
+    st.dataframe(df_exibicao, use_container_width=True, height=400)
+
+    st.download_button(
+        label="📥 Exportar Dados Filtrados (CSV)",
+        data=df_filtrado.to_csv(index=False).encode('utf-8-sig'),
+        file_name="contratos_filtrados.csv",
+        mime="text/csv"
     )
-
-    fig.update_layout(
-        template='plotly_dark',
-        margin=dict(t=50, b=20, l=20, r=20),
-        legend=dict(orientation='v', yanchor='middle', y=0.5, xanchor='left', x=1.05),
-    )
-
-    return fig
-
-
-# -----------------------------------------------------------------------------
-# 4. EXECUÇÃO NO STREAMLIT (EXEMPLO DE INTERFACE)
-# -----------------------------------------------------------------------------
-
-# Exemplo de carregamento de dados (substitua pelo seu dataframe real)
-# df = pd.read_csv("seus_dados.csv")
-
-st.set_page_config(layout='wide', page_title='Dashboard de Contratos')
-
-# Supondo que 'df' é o seu DataFrame carregado:
-if 'df' in locals():
-    df = preparar_dados(df)
-
-    st.subheader(' Matrizes de Dados Mês a Mês')
-    matriz_qtd = gerar_matriz_contratos(df, valor_ou_qtd='qtd')
-    st.dataframe(matriz_qtd, use_container_width=True)
-
-    st.subheader(' Distribuição de Custos')
-    fig_rosca = gerar_grafico_locadoras(df, threshold_percent=2.0)
-    st.plotly_chart(fig_rosca, use_container_width=True)
