@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime
 
-# Configuração da página
+# Configuração inicial da página
 st.set_page_config(
     page_title="GovFleet - Gestão de Contratos e Frota",
     page_icon="🚘",
@@ -22,29 +22,29 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Função para carregar e tratar os dados da planilha
+# Função para carregar e tratar os dados da planilha Excel
 @st.cache_data
 def carregar_dados(caminho_arquivo):
     df = pd.read_excel(caminho_arquivo)
     
-    # Tratamento dos nomes das Secretarias (Remove pontos e sub-órgãos)
+    # Tratamento dos nomes das Secretarias (Limpeza de pontos e sub-órgãos)
     df['Secretaria_Limpa'] = df['Secretaria/Órgão'].apply(
         lambda x: str(x).strip().lstrip('.').split('/')[0].strip()
     )
     
-    # Garantir formato de data e moeda
+    # Conversão e padronização de tipos
     df['Início Contrato'] = pd.to_datetime(df['Início Contrato'])
     df['Fim Contrato'] = pd.to_datetime(df['Fim Contrato'])
     df['Valor Mensal'] = pd.to_numeric(df['Valor Mensal'], errors='coerce')
     
     return df
 
-# Função para calcular histórico mês a mês por Secretaria
+# Função para calcular o histórico mensal por Secretaria
 def calcular_historico_mensal(df):
     inicio_min = df['Início Contrato'].min()
     fim_max = df['Fim Contrato'].max()
     
-    # Gerar intervalo mensal
+    # Intervalo de meses a partir da data do primeiro contrato até a data máxima cadastrada
     intervalo_meses = pd.date_range(
         start=inicio_min.replace(day=1),
         end=min(fim_max, pd.to_datetime('2026-10-31')).replace(day=1),
@@ -55,7 +55,7 @@ def calcular_historico_mensal(df):
     for dt in intervalo_meses:
         fim_do_mes = dt + pd.offsets.MonthEnd(1)
         
-        # Filtrar contratos vigentes no mês de referência
+        # Filtrar contratos que estavam ativos durante o mês de referência
         df_mes = df[(df['Início Contrato'] <= fim_do_mes) & (df['Fim Contrato'] >= dt)]
         
         grp = df_mes.groupby('Secretaria_Limpa').agg(
@@ -72,11 +72,11 @@ def calcular_historico_mensal(df):
         return pd.concat(registros, ignore_index=True)
     return pd.DataFrame()
 
-# Título Principal
+# Título do Sistema
 st.title("🚘 GovFleet — Sistema de Controle de Contratos e Frota")
-st.caption("Painel Executivo e Histórico Evolutivo Mês a Mês das Secretarias.")
+st.caption("Painel Executivo, Gestão Operacional e Evolução Temporal das Secretarias.")
 
-# Carregamento do arquivo
+# Carregamento da planilha
 caminho_excel = 'Contratos vigentes em 31-10-2026.xlsx'
 
 try:
@@ -86,7 +86,7 @@ except Exception as e:
     st.error(f"Erro ao carregar o arquivo {caminho_excel}: {e}")
     st.stop()
 
-# --- BARRA LATERAL (FILTROS) ---
+# --- BARRA LATERAL (FILTROS GLOBAIS) ---
 st.sidebar.header("🔍 Filtros Globais")
 
 secretarias = ["Todas"] + sorted(list(df['Secretaria_Limpa'].unique()))
@@ -98,7 +98,7 @@ loc_selecionada = st.sidebar.selectbox("Filtrar por Locadora", locadoras)
 tipos_veiculo = ["Todos"] + sorted(list(df['Tipo Veículo'].unique()))
 tipo_selecionado = st.sidebar.selectbox("Filtrar por Tipo de Veículo", tipos_veiculo)
 
-# Aplicando os Filtros aos Dados Atuais
+# Aplicando os filtros selecionados
 df_filtrado = df.copy()
 df_hist_filtrado = df_historico.copy()
 
@@ -169,7 +169,7 @@ with tab2:
     st.subheader("📈 Acompanhamento Histórico Mensal por Secretaria")
     
     if not df_hist_filtrado.empty:
-        # Gráfico de Linha do Valor Total ao longo do tempo
+        # Gráfico de Linha Cronológico
         hist_agrupado = df_hist_filtrado.groupby(['Mes_Ano', 'Mes_Formatado', 'Data_Ref'])['valor_total'].sum().reset_index()
         hist_agrupado = hist_agrupado.sort_values(by='Data_Ref')
         
@@ -183,34 +183,39 @@ with tab2:
         )
         st.plotly_chart(fig_linha, use_container_width=True)
         
-        # Tabelas Dinâmicas Mês a Mês
         st.markdown("### 📊 Matrizes de Dados Mês a Mês")
         
         tab_matriz1, tab_matriz2 = st.tabs(["Matriz de Valores (R$)", "Matriz de Quantidade de Contratos"])
         
         with tab_matriz1:
+            # Pivotar utilizando a Data_Ref real para garantir a sequência temporal correta
             pivot_valor = df_hist_filtrado.pivot_table(
                 index='Secretaria_Limpa',
-                columns='Mes_Formatado',
+                columns='Data_Ref',
                 values='valor_total',
                 aggfunc='sum',
                 fill_value=0
             )
+            # Formatar cabeçalho das colunas para MM/AAAA após ordenação
+            pivot_valor.columns = pivot_valor.columns.strftime('%m/%Y')
             st.dataframe(pivot_valor.style.format("R$ {:,.2f}"), use_container_width=True)
             
         with tab_matriz2:
+            # Pivotar utilizando a Data_Ref real para garantir a sequência temporal correta
             pivot_qtd = df_hist_filtrado.pivot_table(
                 index='Secretaria_Limpa',
-                columns='Mes_Formatado',
+                columns='Data_Ref',
                 values='qtd_contratos',
                 aggfunc='sum',
                 fill_value=0
             )
+            # Formatar cabeçalho das colunas para MM/AAAA após ordenação
+            pivot_qtd.columns = pivot_qtd.columns.strftime('%m/%Y')
             st.dataframe(pivot_qtd.style.format("{:.0f}"), use_container_width=True)
     else:
         st.info("Nenhum dado histórico encontrado para os filtros selecionados.")
 
-# === ABA 3: TABELA GERAL ===
+# === ABA 3: TABELA DETALHADA ===
 with tab3:
     st.subheader("📄 Cadastro de Contratos Vigentes")
     
